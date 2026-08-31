@@ -21,7 +21,11 @@ python create_user.py --username vendedor --name "Nome do vendedor"
 
 O comando pedirá uma senha de pelo menos 12 caracteres e imprimirá apenas o hash e os segredos necessários. Guarde essas variáveis no ambiente da hospedagem; não crie um arquivo `.env` versionado.
 
-## Publicar no Railway
+## Publicação atual
+
+O piloto está publicado em `https://agenda-sem-friccao-piloto.streamlit.app/`, com o aplicativo no Streamlit Community Cloud e o PostgreSQL em um projeto Supabase separado. Os segredos ficam nas configurações criptografadas da hospedagem e não no repositório.
+
+## Alternativa: publicar no Railway
 
 1. Versione esta pasta em um repositório privado no GitHub, ou configure `agenda_piloto` como **Root Directory** no projeto existente.
 2. No Railway, crie um projeto a partir do repositório e adicione um serviço PostgreSQL.
