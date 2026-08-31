@@ -260,6 +260,10 @@ def save_data(data=None):
 def ensure_v7_schema(data):
     data.setdefault("inbox", [])
     data.setdefault("review_queue", [])
+    for item in data.get("inbox", []):
+        item.setdefault("observation", "")
+    for item in data.get("review_queue", []):
+        item.setdefault("observation", "")
     for item in data.get("returns", []):
         item.setdefault("last_contact", item.get("note", ""))
         item.setdefault("next_action", "Realizar o próximo contato")
@@ -531,16 +535,17 @@ def natural_preview(text):
         confidence = 0.25 + (0.3 if match else 0) + (0.25 if has_explicit_date else 0) + (0.2 if person != "A identificar" else 0)
         if ambiguous:
             confidence = min(confidence, 0.7)
-        items.append({"raw": raw, "kind": kind, "date": date, "time": dt.time(hour, minute), "duration": 60 if kind == "Reunião" else 30, "person": person, "ambiguous": ambiguous or not match, "confidence": min(1.0, confidence)})
+        items.append({"raw": raw, "kind": kind, "date": date, "time": dt.time(hour, minute), "duration": 60 if kind == "Reunião" else 30, "person": person, "observation": "", "ambiguous": ambiguous or not match, "confidence": min(1.0, confidence)})
     return items
 
 
 def create_from_parsed(item, reviewed=False):
+    observation = item.get("observation", "").strip()
     if item["kind"] == "Retorno":
         st.session_state.data["returns"].append({
             "id": uid(), "title": item.get("title", item["raw"]), "client": item["person"],
             "date": item["date"], "time": item["time"], "status": "Pendente", "owner": CURRENT_USER_NAME,
-            "note": item["raw"], "last_contact": "", "next_action": item["raw"], "crm_status": "Fora do CRM",
+            "note": observation or item["raw"], "last_contact": "", "next_action": item["raw"], "crm_status": "Fora do CRM",
             "original": item["raw"], "confidence": item.get("confidence", 1.0),
             "history": ["Criado após revisão." if reviewed else "Criado automaticamente pela captura rápida."],
         })
@@ -550,7 +555,7 @@ def create_from_parsed(item, reviewed=False):
             "date": item["date"], "start": item["time"],
             "end": (dt.datetime.combine(item["date"], item["time"]) + dt.timedelta(minutes=item["duration"])).time(),
             "owner": CURRENT_USER_NAME, "participants": [item["person"]] if item["person"] != "A identificar" else [],
-            "room": False, "teams": "teams" in item["raw"].lower(), "status": "Confirmado", "note": item["raw"],
+            "room": False, "teams": "teams" in item["raw"].lower(), "status": "Confirmado", "note": observation or item["raw"],
             "recurrence": "Sem recorrência",
         })
 
@@ -1002,6 +1007,12 @@ elif page == "✦ Captura rápida":
                 item["time"] = c3.time_input("Horário", value=item["time"], key=f"pv-time-{index}")
                 item["person"] = st.text_input("Pessoa/cliente", value=item["person"], key=f"pv-person-{index}")
                 item["title"] = st.text_input("Título", value=item["raw"], key=f"pv-title-{index}")
+                item["observation"] = st.text_area(
+                    "Observação",
+                    value=item.get("observation", ""),
+                    placeholder="Contexto importante, o que falar ou próximo passo",
+                    key=f"pv-observation-{index}",
+                )
         if review_queue and st.button("Confirmar itens revisados", type="primary", use_container_width=True):
             for item in review_queue:
                 create_from_parsed(item, reviewed=True)
@@ -1021,9 +1032,15 @@ elif page == "✦ Captura rápida":
                 date = c2.date_input("Data", value=parsed["date"], key=f"in-date-{inbox_item['id']}")
                 due_time = c3.time_input("Horário", value=parsed["time"], key=f"in-time-{inbox_item['id']}")
                 person = st.text_input("Pessoa/cliente", value=parsed["person"], key=f"in-person-{inbox_item['id']}")
+                observation = st.text_area(
+                    "Observação",
+                    value=inbox_item.get("observation", ""),
+                    placeholder="Contexto importante, o que falar ou próximo passo",
+                    key=f"in-observation-{inbox_item['id']}",
+                )
                 if st.button("Agendar e retirar da caixa", key=f"process-in-{inbox_item['id']}", use_container_width=True):
                     snapshot("processar caixa de entrada")
-                    parsed.update({"kind": kind, "date": date, "time": due_time, "person": person, "title": inbox_item["raw"], "confidence": 1.0})
+                    parsed.update({"kind": kind, "date": date, "time": due_time, "person": person, "title": inbox_item["raw"], "observation": observation, "confidence": 1.0})
                     create_from_parsed(parsed, reviewed=True)
                     st.session_state.data["inbox"].remove(inbox_item)
                     st.session_state.notice = "Item processado sem perder a anotação original."
