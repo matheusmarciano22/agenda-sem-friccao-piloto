@@ -17,6 +17,7 @@ import subprocess
 import threading
 import time
 import uuid
+from zoneinfo import ZoneInfo
 
 import streamlit as st
 from streamlit_calendar import calendar
@@ -30,8 +31,16 @@ st.set_page_config(
 )
 
 
-TODAY = dt.date.today()
-NOW = dt.datetime.now()
+APP_TIMEZONE = ZoneInfo(os.environ.get("AGENDA_TIMEZONE", "America/Sao_Paulo"))
+
+
+def local_now():
+    """Horário local sem fuso, compatível com os valores salvos na agenda."""
+    return dt.datetime.now(APP_TIMEZONE).replace(tzinfo=None)
+
+
+TODAY = local_now().date()
+NOW = local_now()
 DATABASE_URL = os.environ.get("DATABASE_URL", "").strip()
 DB_PATH = os.environ.get(
     "AGENDA_DB_PATH",
@@ -148,8 +157,8 @@ def require_login():
         return
 
     locked_until = st.session_state.get("login_locked_until")
-    if locked_until and dt.datetime.now() < locked_until:
-        seconds = max(1, int((locked_until - dt.datetime.now()).total_seconds()))
+    if locked_until and local_now() < locked_until:
+        seconds = max(1, int((locked_until - local_now()).total_seconds()))
         st.warning(f"Muitas tentativas. Aguarde {seconds} segundos para tentar novamente.")
         st.stop()
 
@@ -173,7 +182,7 @@ def require_login():
             st.session_state.login_attempts = attempts
             if attempts >= 5:
                 st.session_state.login_attempts = 0
-                st.session_state.login_locked_until = dt.datetime.now() + dt.timedelta(seconds=60)
+                st.session_state.login_locked_until = local_now() + dt.timedelta(seconds=60)
             st.error("Usuário ou senha incorretos.")
     st.stop()
 
@@ -244,7 +253,7 @@ def save_data(data=None):
     with db_session() as connection:
         connection.execute(
             db_sql("INSERT INTO app_state(id,payload,updated_at) VALUES(1,?,?) ON CONFLICT(id) DO UPDATE SET payload=excluded.payload, updated_at=excluded.updated_at"),
-            (payload, dt.datetime.now().isoformat()),
+            (payload, local_now().isoformat()),
         )
 
 
@@ -312,7 +321,7 @@ def notification_worker(stop_event):
             data = load_data()
             if not data:
                 continue
-            current = dt.datetime.now()
+            current = local_now()
             for item in data.get("returns", []):
                 # Cada instância piloto envia apenas alertas do usuário configurado.
                 if item.get("owner") != CURRENT_USER_NAME:
@@ -446,7 +455,27 @@ def due_datetime(item):
 
 
 def is_overdue(item):
-    return item.get("status") != "Concluído" and due_datetime(item) < dt.datetime.now()
+    return item.get("status") != "Concluído" and due_datetime(item) < local_now()
+
+
+@st.fragment(run_every="15s")
+def show_in_app_reminders():
+    """Mostra retornos vencidos enquanto o vendedor mantém o app aberto."""
+    current = local_now()
+    shown = st.session_state.setdefault("in_app_notifications", {})
+    for item in st.session_state.data.get("returns", []):
+        if item.get("owner") != CURRENT_USER_NAME or item.get("status") == "Concluído":
+            continue
+        due = due_datetime(item)
+        if due > current:
+            continue
+        notification_key = f"{item['id']}:{due.isoformat()}"
+        last_shown = shown.get(notification_key)
+        if last_shown and current - last_shown < dt.timedelta(minutes=REMINDER_REPEAT_MINUTES):
+            continue
+        detail = item.get("next_action") or item.get("note") or item.get("client", "")
+        st.toast(f"🔔 Retorno vencido: {item['title']}\n\n{detail}")
+        shown[notification_key] = current
 
 
 def esc(value):
@@ -540,12 +569,12 @@ def reschedule_dialog(return_id, no_answer=False):
     mode = st.radio("Quando?", ["Mesmo dia", "Outro dia"], horizontal=True, index=default_mode)
     new_date = item["date"] if mode == "Mesmo dia" else st.date_input("Nova data", value=suggested_date, min_value=TODAY)
     suggested_time = item["time"]
-    if not no_answer and due_datetime(item) <= dt.datetime.now():
-        current = dt.datetime.now().replace(second=0, microsecond=0)
+    if not no_answer and due_datetime(item) <= local_now():
+        current = local_now().replace(second=0, microsecond=0)
         suggested_time = (current + dt.timedelta(minutes=15 - current.minute % 15)).time()
     new_time = st.time_input("Novo horário", value=suggested_time, step=900)
     note = st.text_area("Observação da remarcação", placeholder="Motivo ou orientação para o próximo contato")
-    invalid_schedule = dt.datetime.combine(new_date, new_time) <= dt.datetime.now()
+    invalid_schedule = dt.datetime.combine(new_date, new_time) <= local_now()
     if invalid_schedule:
         st.warning("Escolha um horário futuro para que o lembrete possa ser enviado.")
     if st.button("Confirmar remarcação", type="primary", use_container_width=True, disabled=invalid_schedule):
@@ -554,7 +583,7 @@ def reschedule_dialog(return_id, no_answer=False):
         item["date"], item["time"] = new_date, new_time
         if no_answer:
             item["status"] = "Sem resposta"
-            item["last_contact"] = f"Tentativa sem resposta em {dt.datetime.now().strftime('%d/%m/%Y às %H:%M')}."
+            item["last_contact"] = f"Tentativa sem resposta em {local_now().strftime('%d/%m/%Y às %H:%M')}."
             item["history"].append(f"Sem resposta. Nova tentativa em {fmt_date(new_date)} às {new_time.strftime('%H:%M')}. {note}".strip())
             st.session_state.notice = "Sem resposta registrado e nova tentativa agendada."
         else:
@@ -649,6 +678,9 @@ def calendar_events():
         start = dt.datetime.combine(item["date"], item["time"])
         result.append({"id": f"r-{item['id']}", "title": f"↩ {item['title']}", "start": start.isoformat(), "end": (start + dt.timedelta(minutes=30)).isoformat(), "backgroundColor": CATEGORY_COLORS["Retorno"], "borderColor": CATEGORY_COLORS["Retorno"]})
     return result
+
+
+show_in_app_reminders()
 
 
 st.markdown(
@@ -758,7 +790,7 @@ if page == "↩ Retornos":
         color = "#ff453a" if late else "#ffd60a" if item["status"] == "Aguardando resposta" else "#0a84ff"
         badge_bg = "#552a29" if late else "#353326"
         if late:
-            delay = dt.datetime.now() - due_datetime(item)
+            delay = local_now() - due_datetime(item)
             badge = f"ATRASADO · {delay.days}D" if delay.days else f"ATRASADO · {max(1, delay.seconds // 3600)}H"
         else:
             badge = item["status"].upper()
@@ -780,7 +812,7 @@ if page == "↩ Retornos":
             reschedule_dialog(item["id"])
         if b4.button("+15 min", key=f"delay-{item['id']}", use_container_width=True):
             snapshot("adiar retorno em 15 minutos")
-            stamp = max(dt.datetime.now(), due_datetime(item)) + dt.timedelta(minutes=15)
+            stamp = max(local_now(), due_datetime(item)) + dt.timedelta(minutes=15)
             item["date"], item["time"], item["status"] = stamp.date(), stamp.time(), "Remarcado"
             item["history"].append("Adiado em 15 minutos.")
             st.session_state.notice = "Retorno adiado em 15 minutos."
@@ -914,13 +946,16 @@ elif page == "✦ Captura rápida":
             always_review = st.checkbox("Quero revisar tudo antes de agendar", value=False)
             submitted = st.form_submit_button("Salvar agora", type="primary", use_container_width=True)
         st.caption("⌘ Enter para concluir o texto. Tudo é salvo no banco; informações incompletas vão para a caixa de entrada.")
-        with st.expander(f"🔔 Lembretes por {notification_channel()}", expanded=False):
-            st.caption("O serviço verifica retornos vencidos e repete o alerta a cada 30 minutos enquanto estiverem pendentes. Na versão publicada, configure o envio por e-mail.")
+        external_channel = notification_channel()
+        reminder_label = "no aplicativo" if external_channel == "não configurado" else f"no aplicativo e por {external_channel}"
+        with st.expander(f"🔔 Lembretes {reminder_label}", expanded=False):
+            st.caption("Com esta página aberta, o alerta aparece aqui a cada 30 minutos enquanto o retorno estiver pendente. O envio fora do aplicativo exige configurar e-mail.")
             if st.button("Enviar notificação de teste", use_container_width=True):
-                if send_notification("Agenda Sem Fricção", "Notificações ativas. Seus retornos serão lembrados até serem resolvidos."):
-                    st.success("Notificação enviada.")
+                st.toast("🔔 Notificação de teste: os lembretes dentro da agenda estão funcionando.")
+                if external_channel != "não configurado" and send_notification("Agenda Sem Fricção", "Notificações ativas. Seus retornos serão lembrados até serem resolvidos."):
+                    st.success(f"Teste exibido no aplicativo e enviado por {external_channel}.")
                 else:
-                    st.error("O canal de notificação não está configurado ou recusou o envio.")
+                    st.success("Teste exibido. Mantenha a agenda aberta para receber os alertas do piloto.")
         if submitted and note_text.strip():
             snapshot("capturar anotações")
             parsed_items = natural_preview(note_text)
@@ -935,7 +970,7 @@ elif page == "✦ Captura rápida":
                     auto_count += 1
                 else:
                     st.session_state.data["inbox"].append({
-                        "id": uid(), "raw": item["raw"], "created_at": dt.datetime.now(),
+                        "id": uid(), "raw": item["raw"], "created_at": local_now(),
                         "confidence": item["confidence"],
                         "reason": "Data ou horário ambíguo" if item["ambiguous"] else "Informações incompletas",
                     })
